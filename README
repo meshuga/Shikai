@@ -1,0 +1,45 @@
+Shikai 0.1
+Shikai is a HTTPS proxy that monitors server certificates at the
+beginning of the HTTPS communication. It allows only these connections
+to servers, which has trusted certificate.
+
+Currently program can maintain a list of SHA-256 hashes of trusted
+certificates or communicate with Perspectives Project servers.
+If a certificate, that is sent by server through proxy connection
+is listed in database, the connection is continued or rejected if isn't.
+
+Requirements:
+- Python 2.5+
+- python-twisted module
+
+Configuration:
+The program configuration is stored in config/shikai_config file.
+Perspectives Project servers list is located in
+config/perspectives_notary_list.txt.
+
+Configuration of local database of trusted certificates:
+At the beginning certifications should be added to the database.
+In order to do that run the program and connect to some sites -
+before that try to make sure that you are no under MitM attack
+- when you visit a site, Shikai will add the certificate
+to the list of secure certificates.
+After that process, change allowmode in config/shikai_config to 0.
+
+Running:
+twisted -ny shikai.py to see log on a terminal or
+twisted -y shikai.py [-l log.log] to run program as a deamon (-l
+specifies a file to log, default it's twistd.log)
+In web browser preferences set SSL proxy to your Shikai process
+(default 127.0.0.1:8080).
+For example in Opera it can be changed in Preferences(Ctrl+F12)->
+Advanced->Network->Proxy Servers...->HTTPS.
+
+The program was tested and works with Mozilla Firefox 6.0.2,
+Opera 11.52, Google Chrome 13, M$ IE 9 and should work with some other web
+browsers.
+
+Licence:
+http://www.opensource.org/licenses/mit-license.php
+
+Contact:
+meshuga27 at gmail.com

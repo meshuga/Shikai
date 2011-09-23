@@ -1,0 +1,11 @@
+[config]
+# port to listen to
+port = 8080
+
+#file where the database is stored
+datafile = data.dat
+# When allowmode is 1, proxy accepts and saves all certificates
+allowmode = 1
+
+# When perspectives is 1, proxy only asks Perspectives Project servers
+perspectives = 0
