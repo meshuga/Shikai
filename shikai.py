@@ -1,16 +1,26 @@
 # Copyright (c) 2011 Patryk Orwat
 # http://www.opensource.org/licenses/mit-license.php
 
-import struct,string
+import struct, socket, string
 import hashlib
 import sys, os, cPickle
 import ConfigParser
+
+from OpenSSL import SSL
+from StringIO import StringIO
+import json
 
 from twisted.application import service, internet
 from twisted.internet import protocol, reactor
 
 # from https://github.com/von/pyPerspectives
 import Perspectives
+
+def verify_cb(conn, cert, errnum, depth, ok):
+	if checker.checkConvergenceNotaryHash(cert.digest('sha1')):
+		return True
+	else:
+		return False
 
 class RemoteConnectionFactory(protocol.ClientFactory):
 	def __init__(self, client):
@@ -55,6 +65,55 @@ class Checker(service.Service):
 				self.data.add(l)
 			f.close()
 			print 'LOADED',len(self.data),'SHA-256 HASHES'
+
+	def loadConvergenceNotaries(self):
+		f = open('config/convergence_notary_list.txt','r')
+		self.convergenceNotaries = []
+		for line in f:
+			l = line.split(' ')
+			l[1] = l[1].rstrip()
+			self.convergenceNotaries.append(l)
+
+	def checkConvergenceNotaryHash(self, notary_SHA1):
+		for notary in self.convergenceNotaries:
+			if string.replace(notary_SHA1,':','') == notary[1]:
+				return True
+		return False
+
+	def checkConvergenceNotary(self, host, port, host_to_ask, port_to_ask, ask_sha1_hash):
+		ctx = SSL.Context(SSL.SSLv3_METHOD)
+		ctx.set_verify(SSL.VERIFY_PEER, verify_cb)
+
+		sock = SSL.Connection(ctx, socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+
+		postData = 'fingerprint='+ask_sha1_hash
+		data = 'POST /target/' + host_to_ask + '+' + str(port_to_ask) + ' HTTP/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: '+str(len(postData))+'\r\n\r\n' +postData
+		sock.connect((host, port))
+		answer=''
+		try:
+			sock.send(data)
+			while True:
+				recv = sock.recv(4096)
+				if not recv: break
+				answer+=recv
+		except SSL.Error:
+			pass
+		is_listed = False
+		if answer:
+			index = answer.find('\r\n\r\n')
+			json_ans_str = answer[index+4:]
+			json_ans = json.load(StringIO(json_ans_str))
+			for fingerprint in json_ans[u'fingerprintList']:
+				if string.replace(fingerprint[u'fingerprint'].encode('ascii','ignore'),':','') == ask_sha1_hash.upper():
+					is_listed = True
+					break
+		return is_listed
+
+	def checkConvergence(self, host_to_ask, port_to_ask, ask_sha1_hash):
+		for notary in self.convergenceNotaries:
+			if not self.checkConvergenceNotary(notary[0], 443, host_to_ask, port_to_ask, ask_sha1_hash):
+				return False
+		return True
 
 	def checkPerspectives(self, host, port, ask_md5_hash):
 		notaries = Perspectives.Notaries.from_file("config/perspectives_notary_list.txt")
@@ -135,20 +194,24 @@ class Shikai(protocol.Protocol):
 			if hand_type == 11:	# It's a certificate - if there's a chain of certs, we only take care of the first cert
 				(cert_size,) = struct.unpack('!H', data[5*iter_no+shift+13:5*iter_no+shift+15])	# It's a 3 byte field, but usually only 2 less significant are used
 				self.cert_sha256 = hashlib.sha256(data[5*iter_no+shift+15:5*iter_no+shift+15+cert_size]).hexdigest()
+				self.cert_sha1 = hashlib.sha1(data[5*iter_no+shift+15:5*iter_no+shift+15+cert_size]).hexdigest()
 				self.cert_md5 = hashlib.md5(data[5*iter_no+shift+15:5*iter_no+shift+15+cert_size]).hexdigest()
 
+				if convergence_on == 1:
+					if not checker.checkConvergence(self.host, self.port, self.cert_sha1):
+						print 'CONVERGENCE DENIED CERT (SHA1 HASH: %s)' % (self.cert_sha1)
+						self.transport.loseConnection()
 				if perspectives_on == 1:
 					if not checker.checkPerspectives(self.host,self.port, self.cert_md5):
 						print 'PERSPECTIVES DENIED CERT (MD5 HASH: %s)' % (self.cert_md5)
 						self.transport.loseConnection()
-				else:
+				if local_mode == 1:
 					if not checker.check(self.cert_sha256) and allowmode == 0:
 						print 'CERTIFICATE (SHA-256 HASH: %s) FOR SITE %s WASN\'T FOUND' % (self.cert_sha256, self.host)
-						self.server.transport.loseConnection()
 						self.transport.loseConnection()
 					if allowmode == 1:
 						checker.add(self.cert_sha256)
-						print 'CERTIFICATE (SHA-256 HASH: %s) FOR SITE %s WAS ADDED' % (self.cert_sha256, self.host)
+						print 'CERTIFICATE (SHA-256 HASH: %s) FOR SITE %s WAS ADDED %s' % (self.cert_sha256, self.host, self.cert_md5)
 			iter_no+=1
 			shift+=partlen		
 
@@ -184,7 +247,9 @@ parser.read('config/shikai_config')
 listenport = int(parser.get('config','port'))
 allowmode = int(parser.get('config','allowmode'))
 datafile = parser.get('config','datafile')
+local_mode = int(parser.get('config','local_mode'))
 perspectives_on = int(parser.get('config','perspectives'))
+convergence_on = int(parser.get('config','convergence'))
 
 application = service.Application('Shikai')
 shikai_service = service.IServiceCollection(application)
@@ -192,6 +257,7 @@ shikai_service = service.IServiceCollection(application)
 checker = Checker(datafile)
 checker.setName('Checker')
 checker.setServiceParent(shikai_service)
+checker.loadConvergenceNotaries()
 
 shikaifactory = protocol.Factory()
 shikaifactory.protocol = Shikai
