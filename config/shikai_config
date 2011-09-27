@@ -2,15 +2,11 @@
 # port to listen to
 port = 8080
 
-
-local_mode = 0
-#file where the database is stored
+#file where local database is stored
 datafile = data.dat
-# When allowmode is 1, proxy accepts and saves all certificates
-allowmode = 1
 
 # When perspectives is 1, proxy asks Perspectives Project servers
 perspectives = 0
 
 # When convergence is 1, proxy asks Perspectives Project servers
-convergence = 0
+convergence = 1

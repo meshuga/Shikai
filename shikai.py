@@ -3,7 +3,7 @@
 
 import struct, socket, string
 import hashlib
-import sys, os, cPickle
+import sys, os, cPickle, sqlite3
 import ConfigParser
 
 from OpenSSL import SSL
@@ -57,14 +57,17 @@ class RemoteConnection(protocol.Protocol):
 class Checker(service.Service):
 	def __init__(self, dbname):
 		self.dbname = dbname
-		self.data = set()
-		if os.path.isfile(dbname):
-			f = open(dbname, 'r')
-			for line in f:
-				l = line.rstrip()
-				self.data.add(l)
-			f.close()
-			print 'LOADED',len(self.data),'SHA-256 HASHES'
+
+		if not os.path.isfile(dbname):	# The database file doesn't exist
+			self.connection = sqlite3.connect(dbname)
+			self.cursor = self.connection.cursor()
+			self.cursor.execute("CREATE TABLE fingerprints (id INTEGER PRIMARY KEY, host TEXT, sha1 TEXT)")
+			self.connection.commit()
+		else:
+			self.connection = sqlite3.connect(dbname)
+			self.cursor = self.connection.cursor()
+
+		self.loadConvergenceNotaries()
 
 	def loadConvergenceNotaries(self):
 		f = open('config/convergence_notary_list.txt','r')
@@ -87,15 +90,15 @@ class Checker(service.Service):
 		sock = SSL.Connection(ctx, socket.socket(socket.AF_INET, socket.SOCK_STREAM))
 
 		postData = 'fingerprint='+ask_sha1_hash
-		data = 'POST /target/' + host_to_ask + '+' + str(port_to_ask) + ' HTTP/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: '+str(len(postData))+'\r\n\r\n' +postData
+		data = 'POST /target/' + host_to_ask + '+' + str(port_to_ask) + ' HTTP/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: '+str(len(postData))+'\r\n\r\n' + postData
 		sock.connect((host, port))
-		answer=''
+		answer = ''
 		try:
 			sock.send(data)
 			while True:
 				recv = sock.recv(4096)
 				if not recv: break
-				answer+=recv
+				answer += recv
 		except SSL.Error:
 			pass
 		is_listed = False
@@ -119,36 +122,35 @@ class Checker(service.Service):
 		notaries = Perspectives.Notaries.from_file("config/perspectives_notary_list.txt")
 		s = Perspectives.Service(host, port)
 		responses = notaries.query(s)
-		answers={}
-		ans_no=0
+		answers = {}
+		ans_no = 0
 		for response in responses:
 			if response is not None:
-				ans_no+=1
+				ans_no += 1
 				md5_hash = string.replace(str(response.last_key_seen().fingerprint),':','')
 				if answers.has_key(md5_hash):
-					answers[md5_hash]+=1
+					answers[md5_hash] += 1
 				else:
-					answers[md5_hash]=1
+					answers[md5_hash] = 1
 		if answers.has_key(ask_md5_hash) and ans_no != 0 and answers[ask_md5_hash] >= ans_no/2:	# at least half of the answers must have the same hash !
 			return True
 		else:
 			return False
 		
-	def check(self, sha1):
-		if sha1 in self.data:
-			return True
-		else:
-			return False
+	def check(self, host, sha1):
+		self.cursor.execute('SELECT * FROM fingerprints WHERE host = ?', (host,))
+		for ans in self.cursor:
+			if ans[2].encode('ascii','ignore') == sha1:
+				return True
+		return False
 
-	def add(self, sha1):
-		self.data.add(sha1)
+	def add(self, host, sha1):
+		self.cursor.execute('INSERT INTO fingerprints (host, sha1) VALUES (?, ?)', (host, sha1))
+		self.connection.commit()
 
 	def stopService(self):
 		service.Service.stopService(self)
-		f = open(self.dbname, 'w')
-		for h in self.data:
-			f.write(h+'\n')
-		f.close()
+		self.connection.close()
 
 class Shikai(protocol.Protocol):
 	def __init__(self):
@@ -193,25 +195,26 @@ class Shikai(protocol.Protocol):
 				break	# it's not a handshake
 			if hand_type == 11:	# It's a certificate - if there's a chain of certs, we only take care of the first cert
 				(cert_size,) = struct.unpack('!H', data[5*iter_no+shift+13:5*iter_no+shift+15])	# It's a 3 byte field, but usually only 2 less significant are used
-				self.cert_sha256 = hashlib.sha256(data[5*iter_no+shift+15:5*iter_no+shift+15+cert_size]).hexdigest()
 				self.cert_sha1 = hashlib.sha1(data[5*iter_no+shift+15:5*iter_no+shift+15+cert_size]).hexdigest()
 				self.cert_md5 = hashlib.md5(data[5*iter_no+shift+15:5*iter_no+shift+15+cert_size]).hexdigest()
 
-				if convergence_on == 1:
-					if not checker.checkConvergence(self.host, self.port, self.cert_sha1):
-						print 'CONVERGENCE DENIED CERT (SHA1 HASH: %s)' % (self.cert_sha1)
-						self.transport.loseConnection()
-				if perspectives_on == 1:
-					if not checker.checkPerspectives(self.host,self.port, self.cert_md5):
-						print 'PERSPECTIVES DENIED CERT (MD5 HASH: %s)' % (self.cert_md5)
-						self.transport.loseConnection()
-				if local_mode == 1:
-					if not checker.check(self.cert_sha256) and allowmode == 0:
-						print 'CERTIFICATE (SHA-256 HASH: %s) FOR SITE %s WASN\'T FOUND' % (self.cert_sha256, self.host)
-						self.transport.loseConnection()
-					if allowmode == 1:
-						checker.add(self.cert_sha256)
-						print 'CERTIFICATE (SHA-256 HASH: %s) FOR SITE %s WAS ADDED %s' % (self.cert_sha256, self.host, self.cert_md5)
+				if not checker.check(self.host, self.cert_sha1):
+					if convergence_on == 1:
+						if not checker.checkConvergence(self.host, self.port, self.cert_sha1):
+							print 'CONVERGENCE DENIED CERT (SHA1 HASH: %s)  FOR SITE %s' % (self.cert_sha1, self.host)
+							self.transport.loseConnection()
+						else:
+							checker.add(self.host, self.cert_sha1)
+							print 'CERTIFICATE (SHA-1 HASH: %s) FOR SITE %s WAS ADDED' % (self.cert_sha1, self.host)
+					if perspectives_on == 1:
+						if not checker.checkPerspectives(self.host,self.port, self.cert_md5):
+							print 'PERSPECTIVES DENIED CERT (MD5 HASH: %s) FOR SITE %s' % (self.cert_md5, self.host)
+							self.transport.loseConnection()
+						else:
+							checker.add(self.host, self.cert_sha1)
+							print 'CERTIFICATE (SHA-1 HASH: %s) FOR SITE %s WAS ADDED' % (self.cert_sha1, self.host)
+					if convergence_on == 0 and perspectives_on == 0:
+						self.transport.loseConnection() # Neither Convergence nor Perspectives is on
 			iter_no+=1
 			shift+=partlen		
 
@@ -245,9 +248,7 @@ class Shikai(protocol.Protocol):
 parser = ConfigParser.SafeConfigParser()
 parser.read('config/shikai_config')
 listenport = int(parser.get('config','port'))
-allowmode = int(parser.get('config','allowmode'))
 datafile = parser.get('config','datafile')
-local_mode = int(parser.get('config','local_mode'))
 perspectives_on = int(parser.get('config','perspectives'))
 convergence_on = int(parser.get('config','convergence'))
 
@@ -257,7 +258,6 @@ shikai_service = service.IServiceCollection(application)
 checker = Checker(datafile)
 checker.setName('Checker')
 checker.setServiceParent(shikai_service)
-checker.loadConvergenceNotaries()
 
 shikaifactory = protocol.Factory()
 shikaifactory.protocol = Shikai
