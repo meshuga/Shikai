@@ -3,7 +3,7 @@
 
 import struct, socket, string
 import hashlib
-import sys, os, cPickle, sqlite3
+import os, sqlite3
 import ConfigParser
 
 from OpenSSL import SSL
@@ -256,6 +256,7 @@ application = service.Application('Shikai')
 shikai_service = service.IServiceCollection(application)
 
 checker = Checker(datafile)
+checker
 checker.setName('Checker')
 checker.setServiceParent(shikai_service)
 
